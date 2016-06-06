@@ -1,0 +1,156 @@
+#!/usr/bin/env ruby
+# coding: utf-8
+
+# integrate 'bundle install --standalone'
+bundle_setup_path = File.expand_path('../../bundle/bundler/setup.rb', __FILE__)
+require bundle_setup_path if File.exist?(bundle_setup_path)
+
+require_relative "../lib/assets_domain_checker"
+
+require "thor"
+require "ltsv"
+
+Class.new(Thor) do
+  include AssetsDomainChecker::Util
+
+  no_commands do
+    def dump_ltsv(obj)
+      puts AssetsDomainChecker::AssetsDomain.dump_ltsv(obj)
+    end
+
+    def parse_ltsv(file)
+      res = []
+      begin
+        res = AssetsDomainChecker::AssetsDomain.parse_ltsv(file)
+      rescue => e
+        error_exit(msg: e.to_s)
+      end
+      res
+    end
+
+    def _list(uri)
+      assets_nodes = AssetsDomainChecker::AssetsHTMLNodeArray.new()
+
+      begin
+        uri = URI.parse(uri)
+        doc = load_uri(uri)
+      rescue => e
+        error_exit(msg: "check URI parameter", debug: e)
+      end
+
+      doc.css('img').each do |img|
+        assets_nodes.append(AssetsDomainChecker::AssetsHTMLNode.parse(node: img, default_host: uri.host))
+      end
+
+      assets_nodes
+    end
+  end
+
+  desc "list", "list up assets domain"
+  option :uri, required: true
+  def list
+    assets_nodes = _list(options[:uri])
+    dump_ltsv(assets_nodes.group_by_host)
+  end
+
+  desc "bulk_list", "list up assets domain via target URI list file"
+  option :file, required: true
+  def bulk_list
+    file = options[:file]
+    res = []
+
+    open(file) do |f|
+      while line = f.gets do
+        line.strip!
+        next if line.length == 0
+        next if line.match(/^#.*/)
+
+        STDERR.puts(line)
+        assets_nodes = _list(line)
+        res += assets_nodes.group_by_host
+      end
+    end
+
+    dump_ltsv(res)
+  end
+
+  desc "convert", "convert assets domain"
+  option :file, required: true
+  def convert
+    values = parse_ltsv(options[:file])
+
+    res = []
+    values.each do |i|
+      puts_debug("converting ... #{i.to_hash}")
+      next if i.domain.nil?
+
+      begin
+        converted_domain = convert_host(host: i.domain)
+      rescue => e
+        puts_debug(e.to_s)
+        i.converted = false
+      else
+        i.converted = addr?(converted_domain) ? false : true
+      end
+
+      i.converted_domain = i.converted ? converted_domain : i.domain
+      res << i
+    end
+
+    dump_ltsv(res)
+  end
+
+  desc "snip", "snip converted domain"
+  option :file, required: true
+  option :depth, required: true, type: :numeric
+  def snip
+    values = parse_ltsv(options[:file])
+
+    res = []
+    values.each do |i|
+      puts_debug("snipping ... #{i.to_hash}")
+      next if i.converted_domain.nil?
+
+      snipped_domain = snip_domain(domain: i.converted_domain, depth: options[:depth])
+      i.snipped_domain = snipped_domain
+      res << i
+    end
+
+    dump_ltsv(res)
+  end
+
+  desc "gbsnipped", "re-group-by snipped domain"
+  option :file, required: true
+  option :domain_count, default: false, type: :boolean
+  def gbsnipped
+    values = parse_ltsv(options[:file])
+
+    buf_ref_count = {}
+    values.each do |i|
+      puts_debug("re-group-by ... #{i.to_hash}")
+      next if i.snipped_domain.nil?
+      buf_ref_count[i.snipped_domain] = buf_ref_count[i.snipped_domain].to_i
+
+      if options[:domain_count]
+        next if i.ref_domain_count.nil?
+        buf_ref_count[i.snipped_domain] += i.ref_domain_count.to_i
+      else
+        next if i.ref_count.nil?
+        buf_ref_count[i.snipped_domain] += i.ref_count.to_i
+      end
+    end
+
+    res = []
+    buf_ref_count.keys.each do |i|
+      res << AssetsDomainChecker::AssetsDomain.new({
+        snipped_domain: i,
+        ref_count: buf_ref_count[i],
+      })
+    end
+    res.sort! {|a, b| b <=> a }
+
+    AssetsDomainChecker::AssetsDomain.puts_array(res)
+  end
+  # default_command :list
+end.start(ARGV)
+
